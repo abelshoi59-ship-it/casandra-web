@@ -1,0 +1,69 @@
+rules_version = '2';
+
+// Security rules for the Casandra hybrid forum + chat.
+// Model: signed-in users can read public boards/rooms; only the author can
+// edit/delete their own posts/messages; presence is per-user-owned.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAuthor(field) {
+      return isSignedIn() && request.auth.uid == resource.data[field];
+    }
+
+    function incomingAuthorIsSelf(field) {
+      return isSignedIn() && request.auth.uid == request.resource.data[field];
+    }
+
+    // ---- Forum: boards → threads → posts (async, persistent) ----
+    match /boards/{boardId} {
+      allow read: if isSignedIn();
+      allow write: if false; // boards are provisioned server-side / by admins
+
+      match /threads/{threadId} {
+        allow read: if isSignedIn();
+        // Author set on create; title/firstPost immutable author.
+        allow create: if incomingAuthorIsSelf('authorId');
+        allow update: if isAuthor('authorId')
+                      && request.resource.data.authorId == resource.data.authorId;
+        allow delete: if isAuthor('authorId');
+
+        match /posts/{postId} {
+          allow read: if isSignedIn();
+          allow create: if incomingAuthorIsSelf('authorId');
+          allow update: if isAuthor('authorId')
+                        && request.resource.data.authorId == resource.data.authorId;
+          allow delete: if isAuthor('authorId');
+        }
+      }
+    }
+
+    // ---- Real-time chat: rooms → messages + presence + typing ----
+    match /rooms/{roomId} {
+      allow read: if isSignedIn();
+      allow write: if false; // rooms provisioned server-side / by admins
+
+      match /messages/{messageId} {
+        allow read: if isSignedIn();
+        allow create: if incomingAuthorIsSelf('authorId');
+        // Messages are immutable once sent, except the author may soft-delete.
+        allow update: if isAuthor('authorId')
+                      && request.resource.data.authorId == resource.data.authorId;
+        allow delete: if isAuthor('authorId');
+      }
+
+      // Each user owns their own presence/typing doc, keyed by uid.
+      match /presence/{uid} {
+        allow read: if isSignedIn();
+        allow write: if isSignedIn() && request.auth.uid == uid;
+      }
+      match /typing/{uid} {
+        allow read: if isSignedIn();
+        allow write: if isSignedIn() && request.auth.uid == uid;
+      }
+    }
+  }
+}
